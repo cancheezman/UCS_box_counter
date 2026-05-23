@@ -80,3 +80,34 @@ test('CLI runs estimate report against sample fixtures', () => {
   assert.equal(json.report_type, 'estimate');
   assert.match(json.language, /estimate/);
 });
+
+test('CLI --overrides loads a manual override CSV and writes a gray-zone CSV', () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ucs-out-'));
+  const overridesPath = path.join(outDir, 'overrides.csv');
+  fs.writeFileSync(
+    overridesPath,
+    [
+      'customer_email,subscription_id,shopify_order_id,target_box_month,override_action,reason',
+      'someone@example.com,FAKE_SUB_1,,2026-09,include,Pull into Sept',
+    ].join('\n'),
+    'utf8'
+  );
+  const r = spawnSync(process.execPath, [
+    BIN, '--type', 'final',
+    '--target-month', '2026-09',
+    '--appstle', APPSTLE,
+    '--orders', ORDERS,
+    '--overrides', overridesPath,
+    '--out', outDir,
+    '--quiet',
+  ], { encoding: 'utf8' });
+  if (r.status !== 0) process.stderr.write(`stderr: ${r.stderr}\nstdout: ${r.stdout}\n`);
+  assert.equal(r.status, 0);
+  // Gray-zone CSV should exist (may be empty if no gray-zone rows exist in fixtures).
+  const grayPath = path.join(outDir, 'gray_zone_2026-09_final.csv');
+  assert.ok(fs.existsSync(grayPath));
+  // JSON should expose the gray-zone window.
+  const json = JSON.parse(fs.readFileSync(path.join(outDir, 'summary_2026-09_final.json'), 'utf8'));
+  assert.equal(json.gray_zone_window_start, '2026-08-25');
+  assert.equal(json.gray_zone_window_end, '2026-09-03');
+});

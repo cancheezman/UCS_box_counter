@@ -57,19 +57,25 @@ test('parsePlan: explicit prepaid phrasing wins even when amongst extra words', 
   assert.equal(p.length, 6);
 });
 
-test('coverageRange: 3-month plan bought May 10 covers May, June, July', () => {
+test('coverageRange: 3-month plan bought May 10 covers June, July, August', () => {
+  // May 10 is past May's gray zone but before June's gray zone -> first
+  // box = June -> 3-month coverage = June + July + August.
   const r = coverageRange(parseDate('2026-05-10'), 3);
-  assert.equal(formatMonth(r.first), '2026-05');
-  assert.equal(formatMonth(r.last), '2026-07');
-});
-
-test('coverageRange: 3-month plan bought May 26 covers June, July, August', () => {
-  const r = coverageRange(parseDate('2026-05-26'), 3);
   assert.equal(formatMonth(r.first), '2026-06');
   assert.equal(formatMonth(r.last), '2026-08');
 });
 
-test('coversTargetMonth: 12-month plan bought Jan 5 covers December', () => {
+test('coverageRange: 3-month plan bought May 26 covers July, August, September', () => {
+  // May 26 falls in June's gray-zone window -> first box defaults to
+  // July -> coverage = July + August + September.
+  const r = coverageRange(parseDate('2026-05-26'), 3);
+  assert.equal(formatMonth(r.first), '2026-07');
+  assert.equal(formatMonth(r.last), '2026-09');
+});
+
+test('coversTargetMonth: 12-month plan bought Jan 5 covers December (gray zone shifts start to Feb)', () => {
+  // Jan 5 in Jan gray-zone window -> first box = Feb -> 12-month
+  // coverage = Feb 2026 - Jan 2027. December 2026 IS in that range.
   const ok = coversTargetMonth({
     purchaseDate: '2026-01-05',
     planLength: 12,
@@ -79,6 +85,7 @@ test('coversTargetMonth: 12-month plan bought Jan 5 covers December', () => {
 });
 
 test('coversTargetMonth: 2-month plan bought May 10 does NOT cover August', () => {
+  // first box = June -> covers June + July only.
   const ok = coversTargetMonth({
     purchaseDate: '2026-05-10',
     planLength: 2,

@@ -15,6 +15,8 @@ const report = require('./report');
 const csv = require('./csv');
 const privacy = require('./privacy');
 const connector = require('./connector');
+const schedule = require('./schedule');
+const overrides = require('./overrides');
 
 module.exports = {
   ...dates,
@@ -30,4 +32,6 @@ module.exports = {
   csv,
   privacy,
   connector,
+  schedule,
+  overrides,
 };

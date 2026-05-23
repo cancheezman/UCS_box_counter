@@ -83,10 +83,18 @@ test('new-order window: order on Apr 25 NOT in window', () => {
   assert.equal(isNewOrderWindowOrder(o, cycle), false);
 });
 
-test('prepaid subscription covers target month', () => {
-  const s = sub({ plan_name: 'Prepaid: 3 months', created_date: '2026-05-26' });
-  // bought May 26 -> first June -> covers June, July, August.
+test('prepaid subscription bought in May before gray zone covers target June', () => {
+  // May 2 is past May's gray zone (Apr 25-Apr 30); day <= 24 -> first
+  // box = June -> 3-month plan covers June, July, August.
+  const s = sub({ plan_name: 'Prepaid: 3 months', created_date: '2026-05-02' });
   assert.equal(isPrepaidSubscriptionCovering(s, cycle), true);
+});
+
+test('prepaid subscription bought in gray-zone for June does NOT cover target June', () => {
+  // May 26 in June's gray zone -> first box defaults to July ->
+  // coverage = July + August + September, missing June.
+  const s = sub({ plan_name: 'Prepaid: 3 months', created_date: '2026-05-26' });
+  assert.equal(isPrepaidSubscriptionCovering(s, cycle), false);
 });
 
 test('prepaid subscription with unknown plan length is not counted', () => {

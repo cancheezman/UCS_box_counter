@@ -1,0 +1,4 @@
+customer_email,subscription_id,shopify_order_id,target_box_month,override_action,reason
+alice@example.com,APPSTLE_SUB_123,,2026-09,include,Customer wants to be in September pack
+,APPSTLE_SUB_456,,2026-10,exclude,Refund pending
+bob@example.com,,SHOPIFY_ORDER_789,2026-09,include,Late order — confirmed by phone

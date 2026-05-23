@@ -201,21 +201,91 @@ function inRangeInclusive(dt, start, end) {
 }
 
 /**
- * Given a purchase date, return the "first box month" that prepaid purchase covers.
- * Per spec: purchase between the 26th and the 24th maps to the next month's box.
- *   - Purchases on 25th-end of month X -> first box month X+1
- *   - Purchases on 1st-24th of month X -> first box month X (they bought during
- *     the new-order window for X's box).
+ * Schedule-aware first-box-month attribution.
  *
- * Equivalently: purchases on day >= 25 advance to the next month.
+ * The first box month is derived from the UCS billing cycle ("recurring
+ * billing happens on the 25th; a charge on the 25th of M pays for box
+ * M+1") and the new-order window rule ("orders from the 26th of M-1 to
+ * the 24th of M count toward box M+1"). On top of that we apply the
+ * schedule-aware gray-zone rule:
+ *
+ *   - If the purchase date D falls inside the gray-zone window for some
+ *     box month T (`[25th of T-1, first pickup/delivery of T]`, see
+ *     src/schedule.js), then T is the tentative first box month and the
+ *     default attribution shifts to T+1. The order is flagged
+ *     `gray_zone_late_order`.
+ *   - Otherwise the first box month is:
+ *       - D.month + 1 if D.day ≤ 24 (D is in the window for D.month + 1)
+ *       - D.month + 2 if D.day ≥ 25 (D is past the billing day for the
+ *         current cycle, and falls in the window for the cycle after)
+ *
+ * @param {string|Date} purchaseDate
+ * @returns {{
+ *   firstBoxMonth: Date,
+ *   tentativeBoxMonth: Date,
+ *   grayZone: boolean,
+ *   grayZoneWindowStart: Date,
+ *   grayZoneWindowEnd: Date,
+ *   grayZoneSource: 'schedule'|'fallback',
+ * }}
+ */
+function firstBoxMonthAttribution(purchaseDate) {
+  const { grayZoneWindow } = require('./schedule');
+  const pd = parseDate(purchaseDate);
+
+  // Probe the two box months whose gray-zone window can contain D:
+  //   - the month T1 = pd.month + 1 (gray window [25th of pd.month, first pickup of T1])
+  //   - the month T0 = pd.month     (gray window [25th of pd.month-1, first pickup of T0])
+  // We only need these two — gray-zone windows do not span more than ~10
+  // days into a calendar month.
+  const candidates = [firstOfMonth(pd), firstOfMonth(addMonths(pd, 1))];
+  for (const tentative of candidates) {
+    const window = grayZoneWindow(tentative);
+    if (pd.getTime() >= window.start.getTime() && pd.getTime() <= window.end.getTime()) {
+      return {
+        firstBoxMonth: firstOfMonth(addMonths(tentative, 1)),
+        tentativeBoxMonth: tentative,
+        grayZone: true,
+        grayZoneWindowStart: window.start,
+        grayZoneWindowEnd: window.end,
+        grayZoneSource: window.source,
+      };
+    }
+  }
+
+  // No gray-zone shift. The first box month follows from the new-order
+  // window rule: day ≤ 24 -> next month, day ≥ 25 -> month-after-next.
+  const day = pd.getUTCDate();
+  const offset = day >= 25 ? 2 : 1;
+  const firstBox = firstOfMonth(addMonths(pd, offset));
+  // For reporting we still describe the would-be gray-zone window of the
+  // first box, so operators can see why a date was OR wasn't classified.
+  const window = grayZoneWindow(firstBox);
+  return {
+    firstBoxMonth: firstBox,
+    tentativeBoxMonth: firstBox,
+    grayZone: false,
+    grayZoneWindowStart: window.start,
+    grayZoneWindowEnd: window.end,
+    grayZoneSource: window.source,
+  };
+}
+
+/**
+ * Tentative first box month: ignores the schedule-aware gray-zone shift.
+ * Returns `firstBoxMonthAttribution(...).tentativeBoxMonth`.
+ */
+function tentativeFirstBoxMonth(purchaseDate) {
+  return firstBoxMonthAttribution(purchaseDate).tentativeBoxMonth;
+}
+
+/**
+ * Default-attributed first box month. Equivalent to
+ * `firstBoxMonthAttribution(...).firstBoxMonth`. Gray-zone orders shift
+ * to the month after the tentative box month.
  */
 function prepaidFirstBoxMonth(purchaseDate) {
-  const pd = parseDate(purchaseDate);
-  const day = pd.getUTCDate();
-  if (day >= 25) {
-    return firstOfMonth(addMonths(pd, 1));
-  }
-  return firstOfMonth(pd);
+  return firstBoxMonthAttribution(purchaseDate).firstBoxMonth;
 }
 
 module.exports = {
@@ -231,5 +301,7 @@ module.exports = {
   sameDay,
   inRangeInclusive,
   prepaidFirstBoxMonth,
+  tentativeFirstBoxMonth,
+  firstBoxMonthAttribution,
   defaultLiveIngestionWindow,
 };

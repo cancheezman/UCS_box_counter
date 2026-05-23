@@ -17,8 +17,9 @@ const { parseObjects } = require('../src/csv');
 const { normalizeAppstleSubscription } = require('../src/normalize');
 const { createAdapter } = require('../src/shopify');
 const { runCount } = require('../src/count');
-const { buildMarkdown, buildJson, buildCsv } = require('../src/report');
+const { buildMarkdown, buildJson, buildCsv, buildGrayZoneCsv } = require('../src/report');
 const { computeCycle, computeCycleFromTarget, defaultLiveIngestionWindow } = require('../src/dates');
+const { loadOverridesFromFile } = require('../src/overrides');
 
 function parseArgs(argv) {
   const args = { _: [] };
@@ -63,6 +64,10 @@ function usage() {
     '  --until <YYYY-MM-DD>      End of the live ingestion date window. Defaults to',
     '                            the day AFTER the billing cycle date so the 25th',
     '                            (and any midnight spillover) is included.',
+    '  --overrides <path>        Path to a manual overrides CSV. Lets you',
+    '                            include or exclude specific records for a',
+    '                            target box month (see src/overrides.js for',
+    '                            the column schema).',
     '  --out <dir>               Output directory (default: ./out).',
     '  --quiet                   Suppress summary on stdout.',
     '  --verbose                 Also print the mask-safe Markdown summary to stdout.',
@@ -162,13 +167,39 @@ async function main(argv) {
     }
   }
 
+  // Optional manual overrides for first-box-month attribution.
+  let overrides = [];
+  let overrideWarnings = [];
+  if (args.overrides) {
+    if (!fs.existsSync(args.overrides)) {
+      process.stderr.write(`Error: overrides file not found: ${args.overrides}\n`);
+      return 2;
+    }
+    const parsed = loadOverridesFromFile(args.overrides);
+    overrides = parsed.overrides;
+    overrideWarnings = parsed.warnings;
+    if (!args.quiet) {
+      process.stderr.write(
+        `overrides: loaded ${overrides.length} row(s), ${overrideWarnings.length} parse warning(s)\n`
+      );
+    }
+  }
+
   const result = runCount({
     subscriptions,
     orders,
     runDate: args['run-date'] || null,
     targetMonth: args['target-month'] || null,
     reportType,
+    overrides,
   });
+
+  // Merge override-parse warnings into the report's warning stream so
+  // they are surfaced to the operator alongside the rest.
+  for (const w of overrideWarnings) {
+    result.warnings.push({ code: w.code, message: `override row ${w.row_index || '?'} skipped: ${w.code}` });
+    result.warning_counts[w.code] = (result.warning_counts[w.code] || 0) + 1;
+  }
 
   const outDir = path.resolve(process.cwd(), args.out || 'out');
   fs.mkdirSync(outDir, { recursive: true });
@@ -176,9 +207,11 @@ async function main(argv) {
   const mdPath = path.join(outDir, `summary_${stamp}.md`);
   const jsonPath = path.join(outDir, `summary_${stamp}.json`);
   const csvPath = path.join(outDir, `boxes_${stamp}.csv`);
+  const grayCsvPath = path.join(outDir, `gray_zone_${stamp}.csv`);
   fs.writeFileSync(mdPath, buildMarkdown(result), 'utf8');
   fs.writeFileSync(jsonPath, buildJson(result), 'utf8');
   fs.writeFileSync(csvPath, buildCsv(result), 'utf8');
+  fs.writeFileSync(grayCsvPath, buildGrayZoneCsv(result), 'utf8');
 
   if (!args.quiet) {
     // Privacy: print only count totals and file paths to stdout. The full
@@ -197,11 +230,15 @@ async function main(argv) {
       `  expected recurring: ${c.gross_by_bucket.expected_recurring} (net ${c.net_by_bucket.expected_recurring})`,
       `  duplicates removed: ${c.duplicates_removed}`,
       `  final box count: ${c.final_box_count}`,
+      `  gray-zone candidates: ${c.gray_zone_candidates || 0}`,
+      `  gray-zone excluded (override): ${c.gray_zone_excluded || 0}`,
+      `  gray-zone deferred: ${c.gray_zone_deferred || 0}`,
       `  warnings: ${Object.keys(result.warning_counts || {}).length} code(s), ${(result.warnings || []).length} entries`,
       '',
       `Wrote: ${mdPath}`,
       `Wrote: ${jsonPath}`,
       `Wrote: ${csvPath}`,
+      `Wrote: ${grayCsvPath}`,
       '',
       'Note: customer-level details are written only to the CSV/JSON above.',
       'See PRIVACY.md for handling guidance.',
