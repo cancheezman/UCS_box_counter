@@ -42,14 +42,21 @@ re-combines it to handle prepaid logic correctly.
 ## 3. Data sources
 
 - **Appstle subscription CSV** — manually exported by an operator from the
-  Appstle admin.
-- **Shopify orders** — for the first production run, manually exported from
-  Shopify Admin → Orders → Export. The live Shopify adapter slot exists
-  but is disabled until credentials are wired in.
+  Appstle admin. Local file only.
+- **Shopify orders** — either:
+  - **File mode** (`--orders <path>`): manually exported from Shopify
+    Admin → Orders → Export. Local file only.
+  - **Live mode** (`--shopify-live`): pulled from Shopify's Admin GraphQL
+    API via the host's `external-tool` connector
+    (`source_id: "shopify"`, `tool_name: "graphql_query"`). A single
+    hand-written read-only GraphQL document is used (see
+    `src/shopify.js` → `ORDERS_QUERY`). Authentication is performed by
+    the connector layer; this repo never sees, prints, or stores
+    Shopify access tokens.
 
-Both inputs are local files. **No cloud upload, no third-party API call,
-no model / AI call is ever made with customer data.** See "Local-first
-processing" below.
+In both Shopify modes the agent makes no other network calls. **No cloud
+upload, no third-party API call, no model / AI call is ever made with
+customer data.** See "Local-first processing" below.
 
 ## 4. Outputs
 
@@ -74,15 +81,28 @@ committed.
 
 - No PII is sent to any AI/model API. The tool has no LLM integration.
 - No telemetry, analytics, or error-reporting endpoints.
-- The only intended network path is the explicit Shopify Admin API
-  adapter, and only when an operator chooses to enable it. Until then,
-  `src/shopify.js`'s live adapter throws by design.
-- The Shopify live adapter is **read-only in intent**: it requires the
-  `read_orders` and `read_products` scopes and must never call write APIs.
-- Auth tokens (when configured) live in a closure inside the adapter
-  factory. They are not attached to the adapter object, never logged,
-  never serialized, and any error surfaced from the live path is run
-  through a token-scrubber. Tests pin this behavior.
+- The only network path is the Shopify live adapter, and only when an
+  operator passes `--shopify-live`. Without that flag, the agent makes
+  no network calls.
+- The live adapter is **read-only**:
+  - It invokes a single hand-written GraphQL document (`ORDERS_QUERY`)
+    via the `external-tool` CLI as `tool_name: "graphql_query"`.
+  - All required scopes are read-only: `read_orders`,
+    `read_marketplace_orders`, `read_quick_sale`, `read_customers`,
+    `read_products`. Connector operators should provision the integration
+    with these scopes and nothing more (least privilege).
+  - There is no code path in this repo that mutates Shopify state.
+- **No tokens in this repo.** Authentication is the connector's
+  responsibility. This repo never accepts an `accessToken` argument,
+  never reads `SHOPIFY_*` env vars, and never persists credentials.
+- Connector errors are passed through `scrubConnectorError` before
+  re-raising: Shopify-token-shaped substrings (`shpat_…`, `shpca_…`,
+  `shppa_…`) become `[redacted-token]`, email-shaped substrings become
+  `[email]`, and long digit runs become `[id]`. Response bodies are never
+  re-emitted — partially successful calls could contain customer rows.
+- Adapter-level logs are page/order counts only (`"shopify live: page 3,
+  42 line items so far"`). No names, emails, addresses, phones, or row
+  data is logged. Connector subprocess stderr is captured but not echoed.
 
 ## 6. Safe logging
 
@@ -114,9 +134,13 @@ committed.
   for no business benefit.
 - Avoid sharing CSV outputs over broad channels (org-wide Slack channels,
   open Drive folders, personal email). Use a scoped folder or hand-deliver.
-- Never commit `.env` files or hardcoded Shopify tokens. Use the
-  `api_credentials=['external-tools']` pattern for scheduled contexts so
-  credentials are injected by the connector layer.
+- Never commit `.env` files or hardcoded Shopify tokens. There is no
+  code path in this repo that takes a token; tokens live only in the
+  `external-tool` connector layer.
+- For scheduled / background runs, invoke bash with
+  `api_credentials=["external-tools"]` so the harness makes the
+  connector available to the subprocess. Do not pass credentials as CLI
+  arguments or environment variables to this agent.
 
 ## 8. Retention
 
@@ -139,10 +163,15 @@ the tool with a fresh export will reflect any upstream changes.
 
 ## 10. What this tool does NOT do
 
-- It does not transmit customer data over the network (until and unless
-  the live Shopify adapter is explicitly enabled by the operator).
+- It does not transmit customer data over the network unless the
+  operator explicitly opts in with `--shopify-live`. Even then, the only
+  destination is Shopify's own Admin GraphQL via the host connector, and
+  only read queries are issued.
 - It does not store data across runs. Each run is independent.
-- It does not modify Appstle or Shopify records.
+- It does not modify Appstle or Shopify records (the GraphQL document
+  contains only `query` operations).
+- It does not accept, read, or persist any Shopify access token,
+  API key, or `.env` value.
 - It does not call any AI / LLM / model API.
 - It does not collect telemetry or analytics.
 - It does not write outside the chosen `--out` directory.

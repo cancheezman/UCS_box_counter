@@ -50,8 +50,17 @@ npm test
 
 ## Usage
 
+Two ingestion modes for Shopify orders:
+
+- **File mode** (`--orders <path>`): read a manually exported Shopify CSV/JSON.
+  Used for offline runs, tests, and one-off reproducibility.
+- **Live mode** (`--shopify-live`): ingest orders via the host's
+  `external-tool` connector (`source_id: shopify`, `tool_name: graphql_query`).
+  Read-only. The agent never sees or stores Shopify access tokens — the
+  connector layer handles authentication.
+
 ```bash
-# Mid-month estimate run (around the 8th/9th)
+# Mid-month estimate, file mode
 node bin/ucs-box-counter.js \
     --type estimate \
     --run-date 2026-05-09 \
@@ -73,7 +82,48 @@ node bin/ucs-box-counter.js \
     --target-month 2026-06 \
     --appstle samples/appstle_subscriptions.csv \
     --orders samples/shopify_orders.csv
+
+# Live mode (requires the `external-tool` CLI on PATH or EXTERNAL_TOOL_BIN)
+node bin/ucs-box-counter.js \
+    --type final \
+    --target-month 2026-06 \
+    --appstle ./data/appstle.csv \
+    --shopify-live
 ```
+
+### Live Shopify ingestion
+
+When `--shopify-live` is set, the agent:
+
+1. Computes the ingestion date window from the cycle (default
+   `[26th of M-2, 25th of M-1]`). Override with `--since` / `--until`.
+2. Calls `external-tool call '{...}'` for `source_id: "shopify"`,
+   `tool_name: "graphql_query"`, with a single read-only GraphQL document
+   (see `src/shopify.js` → `ORDERS_QUERY`).
+3. Paginates with `pageInfo.hasNextPage` / `endCursor`, page size capped
+   at 50.
+4. Normalizes GraphQL `orders.nodes[]` (with one row per line item) and
+   feeds them into the same `runCount` pipeline as file mode.
+
+Scopes required of the connector for the query to succeed (least
+privilege — all read-only):
+
+- `read_orders`
+- `read_marketplace_orders`
+- `read_quick_sale`
+- `read_customers`
+- `read_products`
+
+The agent has no write codepath. The GraphQL document is hand-written and
+contains only `query` operations.
+
+### Scheduled / background runs
+
+For unattended use, invoke the agent through a shell that has the
+`external-tool` connector available. The Anthropic-style harness pattern
+is to pass `api_credentials=["external-tools"]` when scheduling the bash
+invocation; the connector then resolves Shopify auth at the harness layer
+and this repo never sees a token.
 
 Outputs in `--out` (default `./out`):
 
@@ -98,19 +148,13 @@ path with `--appstle`.
 
 ## Shopify orders
 
-The first production run uses a manually exported CSV (Shopify Admin →
-Orders → Export). Pass it with `--orders <path>`. The adapter understands
-both CSV and JSON formats.
+File mode reads a manually exported CSV (Shopify Admin → Orders → Export);
+pass it with `--orders <path>`. The adapter understands both CSV and JSON.
 
-A `live` adapter slot is reserved in `src/shopify.js`. It throws by design
-until real credentials and pagination are wired up so that tests never make
-network calls. To plug a live integration in later:
-
-1. Provide `auth.accessToken` to `createAdapter({ mode: 'live', auth })`.
-2. Implement `fetchOrders({ since, until })` using `@shopify/admin-api-client`
-   (or similar).
-3. In scheduled contexts, pass `api_credentials=['external-tools']` and
-   wire credentials at the harness/connector layer rather than in source.
+Live mode reads via the `external-tool` connector — see
+[Live Shopify ingestion](#live-shopify-ingestion) above. The live adapter
+is read-only by design, holds no credentials, and surfaces only mask-safe
+error messages.
 
 ## Schedule recommendations
 
@@ -157,7 +201,9 @@ The agent never silently drops edge cases. Each is emitted as a warning in
 - Appstle CSV schemas vary by account/version. The normalizer accepts many
   synonyms but does not auto-discover unmapped fields; if your export uses
   an unfamiliar header, add it to `src/normalize.js`.
-- The live Shopify adapter is a stub. Tests run entirely against fixtures.
+- Live mode requires the `external-tool` CLI in the host environment.
+  In environments where it is not available, run with `--orders <file>`
+  against a manual export.
 - Currency totals are read but not used in any count (refunded amount IS
   used as a heuristic to flag full vs partial refunds).
 - "Manual adjustments / exceptions" for the final run are not yet a first-
@@ -173,10 +219,13 @@ acceptance criterion.
 
 Short version:
 
-- **Read** locally exported Appstle and Shopify CSVs. No network access
-  by default. The Shopify live adapter is opt-in, read-only in intent
-  (`read_orders` + `read_products`), and never logs or serializes auth
-  tokens.
+- **Read** locally exported Appstle CSVs. No network access by default.
+  Shopify orders may be loaded either from a manual CSV/JSON export
+  (`--orders`) or via the `external-tool` connector (`--shopify-live`,
+  opt-in). The live path is read-only (read-only GraphQL document; all
+  required scopes are `read_*`); authentication is handled by the
+  connector layer outside this repo, so the agent never sees or stores
+  Shopify access tokens.
 - **Process** in memory. Only fields needed for counting, dedupe,
   delivery, and audit are normalized; raw rows are dropped.
 - **Write** three files into your chosen `--out` directory: a Markdown
@@ -216,5 +265,12 @@ The suite covers:
 - Privacy: mask utilities (`maskEmail`, `maskPhone`, `maskId`,
   `maskAddress`, `maskName`, `redactRecord`); warning messages never embed
   full emails or full IDs; CLI default stdout does not leak emails,
-  addresses, or phones from the input fixtures; Shopify live adapter
-  never serializes auth tokens and scrubs them from errors.
+  addresses, or phones from the input fixtures.
+- Live Shopify adapter (via injected fake connector): pagination using
+  `pageInfo.hasNextPage` / `endCursor`, GID → numeric ID extraction,
+  GraphQL line-item → row normalization (one row per line item, custom
+  attribute values never echoed, refund-quantity heuristic), connector
+  error scrubbing for tokens / emails / long IDs, clean errors on empty
+  responses. The live tests use the dependency-injection seam in
+  `src/connector.js` so they never spawn `external-tool` and never make
+  network calls.

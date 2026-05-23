@@ -2,7 +2,11 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { createAdapter, createLiveAdapter, scrubAuthFromError } = require('../src/shopify');
+const {
+  createAdapter, createLiveAdapter, gidToNumericId, buildOrdersQuery,
+  normalizeGraphqlOrder, scrubConnectorError, REQUIRED_SCOPES, ORDERS_QUERY,
+  MAX_PAGE_SIZE,
+} = require('../src/shopify');
 
 test('fixture adapter is read-only and resolves locally', async () => {
   const adapter = createAdapter({ fixturePath: 'samples/shopify_orders.csv' });
@@ -12,47 +16,288 @@ test('fixture adapter is read-only and resolves locally', async () => {
   assert.ok(orders.length > 0);
 });
 
-test('live adapter without credentials throws a clear error', async () => {
-  const adapter = createLiveAdapter({});
+test('live adapter advertises read-only intent and required scopes', () => {
+  const adapter = createLiveAdapter({ connectorCall: async () => ({ data: { orders: { pageInfo: {}, nodes: [] } } }) });
   assert.equal(adapter.type, 'live');
+  assert.equal(adapter.source, 'shopify');
   assert.equal(adapter.readOnly, true);
-  assert.deepEqual(adapter.requiredScopes, ['read_orders', 'read_products']);
-  assert.equal(adapter.hasAuth, false);
-  await assert.rejects(() => adapter.fetchOrders({}), /not configured/);
-});
-
-test('live adapter never exposes the auth token on the returned object', () => {
-  const adapter = createLiveAdapter({ accessToken: 'shpat_supersecrettokenvalue1234567890' });
-  // hasAuth is the only signal; the token itself must not be enumerable.
-  assert.equal(adapter.hasAuth, true);
-  const serialized = JSON.stringify(adapter);
-  assert.equal(serialized.includes('shpat_'), false);
-  assert.equal(serialized.includes('supersecret'), false);
-  // No property should be the token, regardless of name.
-  for (const key of Object.keys(adapter)) {
-    const v = adapter[key];
-    if (typeof v === 'string') {
-      assert.equal(v.includes('supersecret'), false, `token leaked via property ${key}`);
-    }
+  // All required scopes are read-only.
+  assert.deepEqual(adapter.requiredScopes, REQUIRED_SCOPES);
+  for (const scope of adapter.requiredScopes) {
+    assert.match(scope, /^read_/, `non-read scope listed: ${scope}`);
   }
 });
 
-test('live adapter scrubs auth-shaped substrings from errors', async () => {
-  const adapter = createLiveAdapter({ accessToken: 'shpat_supersecrettokenvalue1234567890' });
+test('live adapter does not store or expose any auth token', () => {
+  // No auth argument is accepted at all — tokens live in the connector
+  // layer, not in this adapter. Sanity-check by serializing.
+  const adapter = createLiveAdapter({ connectorCall: async () => ({ data: { orders: { pageInfo: {}, nodes: [] } } }) });
+  const serialized = JSON.stringify(adapter);
+  assert.equal(serialized.includes('token'), false);
+  assert.equal(serialized.includes('shpat_'), false);
+});
+
+test('gidToNumericId extracts trailing digits from GIDs', () => {
+  assert.equal(gidToNumericId('gid://shopify/Product/7890199412991'), '7890199412991');
+  assert.equal(gidToNumericId('gid://shopify/Order/5555555'), '5555555');
+  assert.equal(gidToNumericId('not-a-gid'), '');
+  assert.equal(gidToNumericId(''), '');
+  assert.equal(gidToNumericId(null), '');
+});
+
+test('buildOrdersQuery composes Shopify search filter from a date window', () => {
+  assert.equal(
+    buildOrdersQuery({ since: '2026-04-26', until: '2026-05-25' }),
+    'created_at:>=2026-04-26 created_at:<=2026-05-25',
+  );
+  assert.equal(buildOrdersQuery({}), '');
+  assert.equal(buildOrdersQuery({ since: new Date(Date.UTC(2026, 4, 1)) }), 'created_at:>=2026-05-01');
+});
+
+test('normalizeGraphqlOrder: one node with one UCS line item -> one row', () => {
+  const node = {
+    id: 'gid://shopify/Order/100100',
+    name: '#1001',
+    createdAt: '2026-05-25T15:00:00Z',
+    processedAt: '2026-05-25T15:00:01Z',
+    cancelledAt: null,
+    displayFinancialStatus: 'PAID',
+    displayFulfillmentStatus: 'FULFILLED',
+    tags: ['appstle', 'subscription'],
+    email: 'syntho-1@example.test',
+    phone: '+1 555-0100',
+    customer: {
+      id: 'gid://shopify/Customer/5001',
+      displayName: 'Synthetic One',
+      defaultEmailAddress: { emailAddress: 'syntho-1@example.test' },
+      defaultPhoneNumber: { phoneNumber: '+1 555-0100' },
+    },
+    shippingAddress: {
+      name: 'Synthetic One',
+      address1: '100 Test Ave',
+      address2: '',
+      city: 'Testville',
+      provinceCode: 'NY',
+      zip: '00000',
+      phone: '+1 555-0100',
+    },
+    lineItems: {
+      nodes: [
+        {
+          id: 'gid://shopify/LineItem/77001',
+          title: 'The Ultimate Cheese Subscription',
+          name: 'The Ultimate Cheese Subscription - Monthly',
+          quantity: 1,
+          currentQuantity: 1,
+          refundableQuantity: 1,
+          sku: 'UCS-MO',
+          variantTitle: 'Monthly',
+          sellingPlan: { name: 'Monthly' },
+          product: { id: 'gid://shopify/Product/7890199412991', title: 'The Ultimate Cheese Subscription' },
+          variant: { id: 'gid://shopify/ProductVariant/9001', title: 'Monthly', sku: 'UCS-MO' },
+          customAttributes: [{ key: 'note', value: 'do not echo me' }],
+        },
+      ],
+    },
+  };
+  const rows = normalizeGraphqlOrder(node);
+  assert.equal(rows.length, 1);
+  const r = rows[0];
+  assert.equal(r.order_id, '100100');
+  assert.equal(r.order_date, '2026-05-25');
+  assert.equal(r.product_id, '7890199412991');
+  assert.equal(r.variant_id, '9001');
+  assert.equal(r.product_name, 'The Ultimate Cheese Subscription');
+  assert.equal(r.plan_name, 'Monthly');
+  assert.equal(r.customer_id, '5001');
+  assert.equal(r.financial_status, 'paid');
+  assert.equal(r.fulfillment_status, 'fulfilled');
+  assert.equal(r.customer_email, 'syntho-1@example.test');
+  assert.equal(r.shipping_name, 'Synthetic One');
+  assert.equal(r.city, 'Testville');
+  assert.equal(r.province, 'NY');
+  // customAttributes values are NOT echoed; only keys are summarized.
+  assert.equal(r.tags.includes('do not echo me'), false);
+  assert.match(r.tags, /note/);
+});
+
+test('normalizeGraphqlOrder: order with multiple line items emits one row per line item', () => {
+  const node = {
+    id: 'gid://shopify/Order/100200',
+    createdAt: '2026-05-10T12:00:00Z',
+    displayFinancialStatus: 'PAID',
+    displayFulfillmentStatus: 'FULFILLED',
+    customer: { id: 'gid://shopify/Customer/5002' },
+    shippingAddress: { provinceCode: 'NY' },
+    lineItems: {
+      nodes: [
+        {
+          quantity: 1, currentQuantity: 1,
+          sellingPlan: { name: 'Prepaid: 3 months' },
+          product: { id: 'gid://shopify/Product/7890199412991', title: 'UCS' },
+          variant: { id: 'gid://shopify/ProductVariant/9002' },
+        },
+        {
+          quantity: 1, currentQuantity: 1,
+          product: { id: 'gid://shopify/Product/999', title: 'Cheese Knife' },
+          variant: { id: 'gid://shopify/ProductVariant/9003' },
+        },
+      ],
+    },
+  };
+  const rows = normalizeGraphqlOrder(node);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].plan_name, 'Prepaid: 3 months');
+  assert.equal(rows[0].product_id, '7890199412991');
+  assert.equal(rows[1].product_id, '999');
+});
+
+test('normalizeGraphqlOrder: refunded quantity flips refunded_amount heuristic', () => {
+  const node = {
+    id: 'gid://shopify/Order/100300',
+    createdAt: '2026-05-10T12:00:00Z',
+    displayFinancialStatus: 'PARTIALLY_REFUNDED',
+    customer: {},
+    shippingAddress: {},
+    lineItems: {
+      nodes: [
+        {
+          quantity: 2, currentQuantity: 1, refundableQuantity: 1,
+          product: { id: 'gid://shopify/Product/7890199412991', title: 'UCS' },
+          variant: { id: 'gid://shopify/ProductVariant/9004' },
+        },
+      ],
+    },
+  };
+  const rows = normalizeGraphqlOrder(node);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].quantity, 1);
+  assert.equal(rows[0].refunded_amount, 1); // heuristic: currentQty < qty
+});
+
+test('live adapter: paginates using endCursor until hasNextPage=false', async () => {
+  const pages = [
+    {
+      data: {
+        orders: {
+          pageInfo: { hasNextPage: true, endCursor: 'c1' },
+          nodes: [makeFakeOrder(1)],
+        },
+      },
+    },
+    {
+      data: {
+        orders: {
+          pageInfo: { hasNextPage: true, endCursor: 'c2' },
+          nodes: [makeFakeOrder(2), makeFakeOrder(3)],
+        },
+      },
+    },
+    {
+      data: {
+        orders: {
+          pageInfo: { hasNextPage: false, endCursor: 'c3' },
+          nodes: [makeFakeOrder(4)],
+        },
+      },
+    },
+  ];
+  const calls = [];
+  const fakeRunner = async (payload) => {
+    calls.push(payload);
+    return pages.shift();
+  };
+  const adapter = createLiveAdapter({ connectorCall: fakeRunner, pageSize: 2 });
+  const orders = await adapter.fetchOrders({ since: '2026-04-26', until: '2026-05-25' });
+  assert.equal(orders.length, 4);
+  assert.equal(calls.length, 3);
+  // First page: after=null. Subsequent pages: after=<previous endCursor>.
+  assert.equal(calls[0].arguments.variables.after, null);
+  assert.equal(calls[1].arguments.variables.after, 'c1');
+  assert.equal(calls[2].arguments.variables.after, 'c2');
+  // Page size respected and capped.
+  assert.equal(calls[0].arguments.variables.first, 2);
+});
+
+test('live adapter: passes the read-only GraphQL document through', async () => {
+  let captured;
+  const fakeRunner = async (payload) => {
+    captured = payload;
+    return { data: { orders: { pageInfo: { hasNextPage: false }, nodes: [] } } };
+  };
+  const adapter = createLiveAdapter({ connectorCall: fakeRunner });
+  await adapter.fetchOrders({ since: '2026-04-26', until: '2026-05-25' });
+  assert.equal(captured.source_id, 'shopify');
+  assert.equal(captured.tool_name, 'graphql_query');
+  assert.equal(captured.arguments.query, ORDERS_QUERY);
+  assert.equal(
+    captured.arguments.variables.query,
+    'created_at:>=2026-04-26 created_at:<=2026-05-25',
+  );
+  assert.equal(captured.arguments.variables.first <= MAX_PAGE_SIZE, true);
+});
+
+test('live adapter: connector error is scrubbed (no tokens, no emails, no long IDs)', async () => {
+  const fakeRunner = async () => {
+    throw new Error(
+      'connector failed for user alice@example.com with token shpat_ABCDEFGHIJKLMNOPQRSTUVWXYZ on order 1234567890',
+    );
+  };
+  const adapter = createLiveAdapter({ connectorCall: fakeRunner });
   await assert.rejects(
-    () => adapter.fetchOrders({}),
+    () => adapter.fetchOrders({ since: '2026-04-26', until: '2026-05-25' }),
     (err) => {
-      assert.equal(err.message.includes('supersecret'), false);
+      assert.equal(err.message.includes('alice@example.com'), false);
       assert.equal(err.message.includes('shpat_'), false);
-      assert.match(err.message, /not yet implemented|redacted-token/);
+      assert.equal(err.message.includes('1234567890'), false);
+      assert.match(err.message, /\[email\]/);
+      assert.match(err.message, /\[redacted-token\]/);
+      assert.match(err.message, /\[id\]/);
       return true;
     },
   );
 });
 
-test('scrubAuthFromError removes shopify token shapes even when not handed the literal value', () => {
+test('live adapter: missing orders payload throws a clean error', async () => {
+  const fakeRunner = async () => ({ data: {} });
+  const adapter = createLiveAdapter({ connectorCall: fakeRunner });
+  await assert.rejects(() => adapter.fetchOrders({ since: '2026-04-26', until: '2026-05-25' }), /no orders payload/);
+});
+
+test('scrubConnectorError removes shopify token shapes', () => {
   const e = new Error('Request failed: token=shpat_ABCDEFGHIJKLMNOPQRSTUVWX rejected');
-  const scrubbed = scrubAuthFromError(e, '');
+  const scrubbed = scrubConnectorError(e);
   assert.equal(scrubbed.message.includes('shpat_'), false);
   assert.match(scrubbed.message, /\[redacted-token\]/);
 });
+
+function makeFakeOrder(i) {
+  return {
+    id: `gid://shopify/Order/${1000 + i}`,
+    name: `#${1000 + i}`,
+    createdAt: '2026-05-10T12:00:00Z',
+    processedAt: '2026-05-10T12:00:00Z',
+    cancelledAt: null,
+    displayFinancialStatus: 'PAID',
+    displayFulfillmentStatus: 'FULFILLED',
+    tags: ['appstle'],
+    email: `syntho-${i}@example.test`,
+    phone: null,
+    customer: {
+      id: `gid://shopify/Customer/${5000 + i}`,
+      displayName: `Synthetic ${i}`,
+      defaultEmailAddress: { emailAddress: `syntho-${i}@example.test` },
+    },
+    shippingAddress: { name: `Synthetic ${i}`, address1: `${i} Test St`, city: 'Testville', provinceCode: 'NY', zip: '00000' },
+    lineItems: {
+      nodes: [
+        {
+          quantity: 1, currentQuantity: 1,
+          sellingPlan: { name: 'Monthly' },
+          product: { id: 'gid://shopify/Product/7890199412991', title: 'UCS' },
+          variant: { id: `gid://shopify/ProductVariant/${9000 + i}` },
+        },
+      ],
+    },
+  };
+}

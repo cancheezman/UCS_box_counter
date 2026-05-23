@@ -14,6 +14,7 @@ const shopify = require('./shopify');
 const report = require('./report');
 const csv = require('./csv');
 const privacy = require('./privacy');
+const connector = require('./connector');
 
 module.exports = {
   ...dates,
@@ -28,4 +29,5 @@ module.exports = {
   report,
   csv,
   privacy,
+  connector,
 };

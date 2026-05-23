@@ -18,6 +18,7 @@ const { normalizeAppstleSubscription } = require('../src/normalize');
 const { createAdapter } = require('../src/shopify');
 const { runCount } = require('../src/count');
 const { buildMarkdown, buildJson, buildCsv } = require('../src/report');
+const { computeCycle, computeCycleFromTarget, formatDate, addMonths } = require('../src/dates');
 
 function parseArgs(argv) {
   const args = { _: [] };
@@ -53,7 +54,14 @@ function usage() {
     '  --run-date <YYYY-MM-DD>   Run date; cycle is derived from it.',
     '  --target-month <YYYY-MM>  Target box month; overrides --run-date.',
     '  --appstle <path>          Path to the Appstle subscription CSV export.',
-    '  --orders <path>           Path to a Shopify/Appstle orders CSV or JSON.',
+    '  --orders <path>           Path to a Shopify/Appstle orders CSV or JSON fixture.',
+    '  --shopify-live            Ingest orders live via the `external-tool` connector',
+    '                            (source_id "shopify", read-only graphql_query).',
+    '                            Mutually exclusive with --orders.',
+    '  --since <YYYY-MM-DD>      Start of the live ingestion date window. Defaults',
+    '                            to the start of the new-order window for the target.',
+    '  --until <YYYY-MM-DD>      End of the live ingestion date window. Defaults to',
+    '                            the billing cycle date for the target.',
     '  --out <dir>               Output directory (default: ./out).',
     '  --quiet                   Suppress summary on stdout.',
     '  --verbose                 Also print the mask-safe Markdown summary to stdout.',
@@ -61,16 +69,20 @@ function usage() {
     '  --version                 Print version and exit.',
     '',
     'Examples:',
+    '  # Offline / manual export',
     '  ucs-box-counter --type estimate --run-date 2026-05-09 \\',
     '      --appstle samples/appstle.csv --orders samples/shopify-orders.csv',
     '',
+    '  # Live Shopify ingestion via external-tool',
     '  ucs-box-counter --type final --target-month 2026-06 \\',
-    '      --appstle samples/appstle.csv --orders samples/shopify-orders.csv',
+    '      --appstle ./data/appstle.csv --shopify-live',
     '',
     'Notes:',
-    '  Live Shopify auth is not required. For scheduled contexts using an',
-    '  external Shopify CLI tool, pass api_credentials=["external-tools"] and',
-    '  point --orders at the file the external tool produces.',
+    '  Live mode requires the `external-tool` CLI to be present in $PATH (or set',
+    '  EXTERNAL_TOOL_BIN). Authentication is performed by the connector — this',
+    '  agent never sees or stores Shopify tokens. The live ingestion query is',
+    '  read-only (graphql_query). In scheduled/background contexts, run with',
+    '  api_credentials=["external-tools"].',
   ].join('\n');
 }
 
@@ -102,7 +114,14 @@ async function main(argv) {
   const appstleRows = parseObjects(appstleText);
   const subscriptions = appstleRows.map(normalizeAppstleSubscription);
 
-  // Load orders (optional but recommended).
+  // Load orders. Three modes:
+  //   --orders <file>     : load from local CSV/JSON
+  //   --shopify-live      : ingest via the external-tool connector
+  //   (neither)           : orders empty (subscriptions-only run)
+  if (args.orders && args['shopify-live']) {
+    process.stderr.write('Error: --orders and --shopify-live are mutually exclusive.\n');
+    return 2;
+  }
   let orders = [];
   if (args.orders) {
     if (!fs.existsSync(args.orders)) {
@@ -111,6 +130,33 @@ async function main(argv) {
     }
     const adapter = createAdapter({ fixturePath: args.orders });
     orders = await adapter.fetchOrders({});
+  } else if (args['shopify-live']) {
+    // Compute the ingestion window. We default to [new-order window start,
+    // billing cycle date] — that covers both the 25th billing run and the
+    // new-order window. For target month M:
+    //   since = 26th of M-2
+    //   until = 25th of M-1 (billing cycle date)
+    // Operators can override with --since/--until.
+    const cycle = args['target-month']
+      ? computeCycleFromTarget(args['target-month'])
+      : computeCycle(args['run-date'] || new Date());
+    const since = args.since || formatDate(cycle.newOrderWindowStart);
+    // Default upper bound: one day after billing cycle, to catch orders
+    // processed just after midnight on the 25th.
+    const defaultUntil = formatDate(addMonths(cycle.billingCycleDate, 0));
+    const until = args.until || defaultUntil;
+    const log = args.quiet ? null : (msg) => process.stderr.write(`${msg}\n`);
+    const adapter = createAdapter({
+      mode: 'live',
+      log,
+    });
+    if (!args.quiet) {
+      process.stderr.write(`shopify live: ingesting orders ${since} -> ${until}\n`);
+    }
+    orders = await adapter.fetchOrders({ since, until });
+    if (!args.quiet) {
+      process.stderr.write(`shopify live: fetched ${orders.length} line items\n`);
+    }
   }
 
   const result = runCount({
