@@ -91,13 +91,23 @@ test('defaultLiveIngestionWindow round-trip matches CLI docs (May 9 -> covers Ma
   assert.ok(w.since <= '2026-05-25' && '2026-05-25' < w.until);
 });
 
-test('prepaidFirstBoxMonth: 26th-end advances; 1st-24th stays', () => {
-  assert.equal(formatMonth(prepaidFirstBoxMonth('2026-05-09')), '2026-05');
-  assert.equal(formatMonth(prepaidFirstBoxMonth('2026-05-24')), '2026-05');
-  // The spec says "between the 26th and the 24th maps to next month's box".
-  // Our boundary: day >= 25 advances. This matches the spec example that
-  // someone signing up on the 25th has paid for the upcoming billing's box.
-  assert.equal(formatMonth(prepaidFirstBoxMonth('2026-05-25')), '2026-06');
-  assert.equal(formatMonth(prepaidFirstBoxMonth('2026-05-26')), '2026-06');
-  assert.equal(formatMonth(prepaidFirstBoxMonth('2026-05-31')), '2026-06');
+test('prepaidFirstBoxMonth: schedule-aware first box month under the gray-zone rule', () => {
+  // May 9 -> not in any gray-zone window (gray May = Apr 25-Apr 30, gray
+  // June = May 25-Jun 4). day=9 <= 24 -> first box = June.
+  assert.equal(formatMonth(prepaidFirstBoxMonth('2026-05-09')), '2026-06');
+  // May 24 -> no gray zone; day=24 <= 24 -> first box = June.
+  assert.equal(formatMonth(prepaidFirstBoxMonth('2026-05-24')), '2026-06');
+  // May 25-31 fall in the gray-zone window for June ([May 25, Jun 4]);
+  // they default to July.
+  assert.equal(formatMonth(prepaidFirstBoxMonth('2026-05-25')), '2026-07');
+  assert.equal(formatMonth(prepaidFirstBoxMonth('2026-05-26')), '2026-07');
+  assert.equal(formatMonth(prepaidFirstBoxMonth('2026-05-31')), '2026-07');
+  // Spec example: Aug 28 -> gray zone for September -> defaults to October.
+  assert.equal(formatMonth(prepaidFirstBoxMonth('2026-08-28')), '2026-10');
+});
+
+test('prepaidFirstBoxMonth: order placed AFTER the first pickup is no longer gray-zone', () => {
+  // First pickup for June is 2026-06-04. June 5 is past it -> not gray
+  // zone -> day=5 <= 24 -> first box = July.
+  assert.equal(formatMonth(prepaidFirstBoxMonth('2026-06-05')), '2026-07');
 });

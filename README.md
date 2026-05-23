@@ -199,6 +199,46 @@ Bucket priority for which row wins when input order is mixed:
 `recurring_billing` > `new_order_window` > `prepaid_coverage` >
 `expected_recurring`.
 
+## Gray-zone late orders
+
+The first box month for a new UCS purchase is **not** the calendar month
+of the order. Instead it is derived from the billing cycle and the UCS
+pickup/delivery schedule (see `src/schedule.js`):
+
+- For an order placed in `[26th of M-1, 24th of M]`, the first box month
+  is `M+1`. This is the "standard" 26th-24th rule.
+- For an order placed in `[25th of M-1, first pickup of M]` (the **gray
+  zone** for box month `M`), the pack may already be committed. These
+  orders are flagged `gray_zone_late_order` and, by default, attributed
+  to box month `M+1` instead of `M`.
+
+Example: a subscription purchased on **2026-08-28** defaults to the
+**October 2026** box, not September 2026. September's first pickup is
+2026-09-03 (per the TOMME UCS 2026 schedule), so the gray-zone window
+for September is `[2026-08-25, 2026-09-03]`.
+
+### Manual overrides
+
+Pass a CSV via `--overrides <path>` to override the default attribution
+for specific records. Columns:
+
+| column | description |
+| --- | --- |
+| `customer_email` | one of the identifier columns (matched together with `target_box_month`) |
+| `subscription_id` | strongest match key |
+| `shopify_order_id` | second-strongest match key |
+| `target_box_month` | `YYYY-MM`; the month this row addresses |
+| `override_action` | `include` or `exclude` |
+| `reason` | free-text audit trail (surfaced in the gray-zone CSV) |
+
+Match priority is `subscription_id` -> `shopify_order_id` -> `customer_email + target_box_month`.
+
+Each run writes a per-month review CSV at
+`out/gray_zone_<YYYY-MM>_<type>.csv` listing every gray-zone candidate
+(included, excluded, deferred, or surfaced) so TOMME can decide each
+case by hand. A sample overrides CSV lives at
+`samples/ucs_manual_overrides.csv`.
+
 ## Review flags
 
 The agent never silently drops edge cases. Each is emitted as a warning in
@@ -214,6 +254,8 @@ The agent never silently drops edge cases. Each is emitted as a warning in
 - `cancelled_after_paying_for_target`.
 - `product_id_mismatch_name_looks_ucs`.
 - `delivery_method_missing`.
+- `gray_zone_late_order` — order placed in the gray-zone window for the
+  upcoming box month. See "Gray-zone late orders" above.
 
 ## Known limitations
 
