@@ -164,6 +164,39 @@ The agent never silently drops edge cases. Each is emitted as a warning in
   class input. For now, add or remove rows in the orders fixture, or
   post-edit the output CSV.
 
+## Privacy
+
+This tool processes customer PII (names, emails, phone numbers, shipping
+addresses, subscription/order IDs). It is designed for **local-first**
+processing — no cloud, no AI, no telemetry — and treats privacy as an
+acceptance criterion.
+
+Short version:
+
+- **Read** locally exported Appstle and Shopify CSVs. No network access
+  by default. The Shopify live adapter is opt-in, read-only in intent
+  (`read_orders` + `read_products`), and never logs or serializes auth
+  tokens.
+- **Process** in memory. Only fields needed for counting, dedupe,
+  delivery, and audit are normalized; raw rows are dropped.
+- **Write** three files into your chosen `--out` directory: a Markdown
+  summary (mask-safe), a JSON summary (mask-safe `message`, sensitive
+  `context`), and a customer-level CSV (full PII by design — that is
+  the operational pack list).
+- **Log** safely. Default CLI stdout shows totals and file paths only —
+  no full emails, addresses, or phones. Warning messages mask emails,
+  IDs, and phones; structured context fields keep real values for
+  reconciliation.
+
+`.gitignore` blocks output files, real input files, `.env` files, and
+credential files. Sample fixtures under `samples/` are **synthetic only**
+(see `samples/README.md`).
+
+Full details — PII categories, purpose, retention guidance, operator
+responsibilities, PIPEDA-style framing, what the tool does **not** do —
+are in [PRIVACY.md](./PRIVACY.md). Read it before running against real
+exports.
+
 ## Tests
 
 ```bash
@@ -180,3 +213,8 @@ The suite covers:
 - All warning codes.
 - CSV column order, UTF-8 BOM, and Markdown/JSON summary language.
 - End-to-end CLI run against `samples/`.
+- Privacy: mask utilities (`maskEmail`, `maskPhone`, `maskId`,
+  `maskAddress`, `maskName`, `redactRecord`); warning messages never embed
+  full emails or full IDs; CLI default stdout does not leak emails,
+  addresses, or phones from the input fixtures; Shopify live adapter
+  never serializes auth tokens and scrubs them from errors.

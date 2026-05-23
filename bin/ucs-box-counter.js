@@ -56,6 +56,7 @@ function usage() {
     '  --orders <path>           Path to a Shopify/Appstle orders CSV or JSON.',
     '  --out <dir>               Output directory (default: ./out).',
     '  --quiet                   Suppress summary on stdout.',
+    '  --verbose                 Also print the mask-safe Markdown summary to stdout.',
     '  --help                    Show this help.',
     '  --version                 Print version and exit.',
     '',
@@ -131,8 +132,36 @@ async function main(argv) {
   fs.writeFileSync(csvPath, buildCsv(result), 'utf8');
 
   if (!args.quiet) {
-    process.stdout.write(buildMarkdown(result) + '\n');
-    process.stdout.write(`\nWrote: ${mdPath}\nWrote: ${jsonPath}\nWrote: ${csvPath}\n`);
+    // Privacy: print only count totals and file paths to stdout. The full
+    // Markdown summary is written to disk (and contains only mask-safe
+    // warning messages); the customer-level CSV is the only place full PII
+    // lives, and it never goes to stdout. Use --verbose to also print the
+    // mask-safe Markdown body.
+    const c = result.counts;
+    const lines = [
+      `UCS box count — ${result.report_type} for ${result.target_box_month}`,
+      `  billing cycle: ${result.billing_cycle_date}`,
+      `  new-order window: ${result.new_order_window_start} -> ${result.new_order_window_end}`,
+      `  recurring billing: ${c.gross_by_bucket.recurring_billing} (net ${c.net_by_bucket.recurring_billing})`,
+      `  new-order window: ${c.gross_by_bucket.new_order_window} (net ${c.net_by_bucket.new_order_window})`,
+      `  prepaid coverage: ${c.gross_by_bucket.prepaid_coverage} (net ${c.net_by_bucket.prepaid_coverage})`,
+      `  expected recurring: ${c.gross_by_bucket.expected_recurring} (net ${c.net_by_bucket.expected_recurring})`,
+      `  duplicates removed: ${c.duplicates_removed}`,
+      `  final box count: ${c.final_box_count}`,
+      `  warnings: ${Object.keys(result.warning_counts || {}).length} code(s), ${(result.warnings || []).length} entries`,
+      '',
+      `Wrote: ${mdPath}`,
+      `Wrote: ${jsonPath}`,
+      `Wrote: ${csvPath}`,
+      '',
+      'Note: customer-level details are written only to the CSV/JSON above.',
+      'See PRIVACY.md for handling guidance.',
+      '',
+    ];
+    process.stdout.write(lines.join('\n'));
+    if (args.verbose) {
+      process.stdout.write('\n' + buildMarkdown(result) + '\n');
+    }
   }
   return 0;
 }
@@ -141,7 +170,14 @@ if (require.main === module) {
   main(process.argv.slice(2)).then(
     (code) => process.exit(code || 0),
     (err) => {
-      process.stderr.write(`ucs-box-counter: ${err.stack || err.message || err}\n`);
+      // Privacy: scrub anything that looks like an email or long digit run
+      // from error output before printing. Internal IDs are kept short on
+      // purpose so operators can find them in the source files.
+      const raw = String(err.stack || err.message || err);
+      const scrubbed = raw
+        .replace(/[\w.+-]+@[\w.-]+/g, '[email]')
+        .replace(/\b\d{7,}\b/g, '[id]');
+      process.stderr.write(`ucs-box-counter: ${scrubbed}\n`);
       process.exit(1);
     }
   );

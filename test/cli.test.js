@@ -41,6 +41,26 @@ test('CLI runs final report against sample fixtures and writes output files', ()
   assert.equal(csv.charCodeAt(0), 0xfeff);
 });
 
+test('CLI default stdout does not leak full emails, addresses, or phones', () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ucs-out-'));
+  const r = spawnSync(process.execPath, [
+    BIN, '--type', 'estimate',
+    '--run-date', '2026-05-09',
+    '--appstle', APPSTLE,
+    '--orders', ORDERS,
+    '--out', outDir,
+  ], { encoding: 'utf8' });
+  assert.equal(r.status, 0);
+  // Full emails from the fixtures must not appear on stdout.
+  for (const email of ['alice@example.com', 'bob@example.com', 'carol@example.com']) {
+    assert.equal(r.stdout.includes(email), false, `stdout leaked email ${email}`);
+  }
+  // No address line should appear verbatim.
+  assert.equal(r.stdout.includes('1 Main St'), false);
+  // No phone number should appear verbatim.
+  assert.equal(r.stdout.includes('555-0101'), false);
+});
+
 test('CLI runs estimate report against sample fixtures', () => {
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ucs-out-'));
   const r = spawnSync(process.execPath, [

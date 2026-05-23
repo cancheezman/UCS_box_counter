@@ -122,6 +122,49 @@ test('paused subscription with paid order in window flagged', () => {
   assert.ok(codes(w).includes(WARNING_CODES.PAUSED_BUT_PAID_FOR_TARGET));
 });
 
+test('warning messages do not embed full email addresses', () => {
+  const subs = [
+    normalizeAppstleSubscription({
+      subscription_id: 'S10', customer_email: 'leak-me@example.com', status: 'active',
+      product_id: UCS_PRODUCT_ID, plan_name: 'Monthly', next_order_date: '2026-05-25',
+      created_date: '2026-01-10', delivery_method: 'shipping',
+    }),
+    normalizeAppstleSubscription({
+      subscription_id: 'S11', customer_email: 'leak-me@example.com', status: 'active',
+      product_id: UCS_PRODUCT_ID, plan_name: 'Monthly', next_order_date: '2026-05-25',
+      created_date: '2026-01-12', delivery_method: 'shipping',
+    }),
+  ];
+  const w = checkSubscriptions(subs, cycle, []);
+  for (const warning of w) {
+    assert.equal(
+      warning.message.includes('leak-me@example.com'),
+      false,
+      `warning ${warning.code} message leaked full email: ${warning.message}`,
+    );
+  }
+  // But the structured context should still have the real value for ops use.
+  const multi = w.find((x) => x.code === WARNING_CODES.MULTI_SUBS_SAME_EMAIL);
+  assert.ok(multi);
+  assert.equal(multi.customer_email, 'leak-me@example.com');
+});
+
+test('warning messages mask subscription/order IDs', () => {
+  const sub = normalizeAppstleSubscription({
+    subscription_id: 'APP-9001-very-long-id', customer_email: 'x@example.com', status: 'active',
+    product_id: UCS_PRODUCT_ID, plan_name: 'Prepaid plan', created_date: '2026-04-10',
+    delivery_method: 'shipping',
+  });
+  const w = checkSubscriptions([sub], cycle, []);
+  for (const warning of w) {
+    assert.equal(
+      warning.message.includes('APP-9001-very-long-id'),
+      false,
+      `warning ${warning.code} message leaked full subscription_id: ${warning.message}`,
+    );
+  }
+});
+
 test('delivery method missing flagged', () => {
   const s = normalizeAppstleSubscription({
     subscription_id: 'S9', customer_email: 'a@b.com', status: 'active',

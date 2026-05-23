@@ -3,6 +3,12 @@
 // Normalize raw rows from Appstle CSV exports and Shopify/Appstle order
 // exports into a stable internal shape. Appstle headers vary by account and
 // export version; we accept many synonyms.
+//
+// Data minimization: we deliberately do NOT retain the full raw input row on
+// each normalized record. Only fields used downstream (counting, dedupe,
+// delivery, eligibility, warnings, CSV output) are kept. If you need a field
+// that isn't here, add it to the picker explicitly rather than re-introducing
+// a `raw` passthrough — that is how PII sprawl creeps in.
 
 const { parseDate, formatDate } = require('./dates');
 const { parsePlan } = require('./prepaid');
@@ -124,7 +130,6 @@ function normalizeAppstleSubscription(row) {
     phone,
     is_ucs: product_match.match,
     ucs_match_method: product_match.method,
-    raw: row,
   };
 }
 
@@ -232,7 +237,6 @@ function normalizeShopifyOrder(row) {
     cancelled_at,
     is_ucs: product_match.match,
     ucs_match_method: product_match.method,
-    raw: row,
   };
 }
 

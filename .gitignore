@@ -1,8 +1,40 @@
+# Dependencies
 node_modules/
+coverage/
+
+# Generated output (contains PII — never commit)
 out/
 output/
-*.log
-.DS_Store
+reports/
+boxes_*.csv
+summary_*.md
+summary_*.json
+
+# Local input directories — never commit real customer/order data
+data/
+inputs/
+appstle/
+shopify/
+exports/
+private/
+
+# Any CSV/JSON in the repo root looks like real-data input — block it.
+# Sample fixtures live under samples/ (allow-listed below) and tests under test/.
+/*.csv
+/*.json
+!package.json
+!package-lock.json
+
+# Secrets / credentials
 .env
-.env.local
-coverage/
+.env.*
+*.pem
+*.key
+secrets/
+credentials.json
+
+# OS / editor noise
+.DS_Store
+.vscode/
+.idea/
+*.log

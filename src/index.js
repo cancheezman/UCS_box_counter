@@ -13,6 +13,7 @@ const count = require('./count');
 const shopify = require('./shopify');
 const report = require('./report');
 const csv = require('./csv');
+const privacy = require('./privacy');
 
 module.exports = {
   ...dates,
@@ -26,4 +27,5 @@ module.exports = {
   shopify,
   report,
   csv,
+  privacy,
 };
