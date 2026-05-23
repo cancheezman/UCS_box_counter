@@ -1,0 +1,8 @@
+subscription_id,customer_name,customer_email,status,product_id,product_name,plan_name,created_date,next_order_date,delivery_method,shipping_name,shipping_address_1,city,province,postal_code,phone,processed_order_count,revenue
+APP-1001,Alice Allen,alice@example.com,active,7890199412991,The Ultimate Cheese Subscription,Monthly,2026-01-15,2026-05-25,shipping,Alice Allen,1 Main St,Brooklyn,NY,11201,555-0101,4,180.00
+APP-1002,Bob Brown,bob@example.com,active,7890199412991,The Ultimate Cheese Subscription,Prepaid: 3 months,2026-05-02,,shipping,Bob Brown,2 Oak St,Queens,NY,11375,555-0102,1,135.00
+APP-1003,Carol Chen,carol@example.com,active,7890199412991,The Ultimate Cheese Subscription,12 month prepaid,2026-01-05,,local_delivery,Carol Chen,3 Pine St,Manhattan,NY,10001,555-0103,5,540.00
+APP-1004,Dan Davies,dan@example.com,paused,7890199412991,The Ultimate Cheese Subscription,Monthly,2025-11-10,,shipping,Dan Davies,4 Cedar St,Brooklyn,NY,11215,555-0104,6,270.00
+APP-1005,Eve Edwards,eve@example.com,active,7890199412991,The Ultimate Cheese Subscription,Prepaid,2026-04-10,,shipping,Eve Edwards,5 Birch St,Brooklyn,NY,11211,555-0105,1,90.00
+APP-1006,Faye Foster,,active,7890199412991,The Ultimate Cheese Subscription,Monthly,2026-02-20,2026-05-25,shipping,Faye Foster,6 Elm St,Brooklyn,NY,11206,555-0106,3,135.00
+APP-1007,Greg Garcia,greg@example.com,cancelled,7890199412991,The Ultimate Cheese Subscription,Monthly,2025-12-01,,shipping,Greg Garcia,7 Maple St,Brooklyn,NY,11217,555-0107,2,90.00
