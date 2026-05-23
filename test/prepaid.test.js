@@ -40,6 +40,23 @@ test('parsePlan: recurring plan returns isPrepaid false', () => {
   assert.equal(p.isPrepaid, false);
 });
 
+test('parsePlan: "12 month commitment" recurring plan is NOT flagged as prepaid', () => {
+  const p = parsePlan('12 month commitment, billed monthly');
+  assert.equal(p.isPrepaid, false);
+  assert.equal(p.length, null);
+});
+
+test('parsePlan: "2 month minimum recurring" is NOT prepaid', () => {
+  const p = parsePlan('2 month minimum recurring');
+  assert.equal(p.isPrepaid, false);
+});
+
+test('parsePlan: explicit prepaid phrasing wins even when amongst extra words', () => {
+  const p = parsePlan('UCS Prepaid 6-month plan (Local Delivery)');
+  assert.equal(p.isPrepaid, true);
+  assert.equal(p.length, 6);
+});
+
 test('coverageRange: 3-month plan bought May 10 covers May, June, July', () => {
   const r = coverageRange(parseDate('2026-05-10'), 3);
   assert.equal(formatMonth(r.first), '2026-05');

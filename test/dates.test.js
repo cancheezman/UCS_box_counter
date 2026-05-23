@@ -7,10 +7,12 @@ const {
   formatDate,
   formatMonth,
   parseMonth,
+  addDays,
   addMonths,
   computeCycle,
   computeCycleFromTarget,
   prepaidFirstBoxMonth,
+  defaultLiveIngestionWindow,
 } = require('../src/dates');
 
 test('parseDate accepts YYYY-MM-DD and ISO timestamps', () => {
@@ -61,6 +63,32 @@ test('computeCycleFromTarget: target June -> billing May 25, window Apr 26 - May
   assert.equal(formatDate(cycle.billingCycleDate), '2026-05-25');
   assert.equal(formatDate(cycle.newOrderWindowStart), '2026-04-26');
   assert.equal(formatDate(cycle.newOrderWindowEnd), '2026-05-24');
+});
+
+test('addDays: simple positive/negative additions cross month boundaries', () => {
+  assert.equal(formatDate(addDays(parseDate('2026-05-25'), 1)), '2026-05-26');
+  assert.equal(formatDate(addDays(parseDate('2026-05-31'), 1)), '2026-06-01');
+  assert.equal(formatDate(addDays(parseDate('2026-03-01'), -1)), '2026-02-28');
+  assert.equal(formatDate(addDays(parseDate('2026-05-25'), 0)), '2026-05-25');
+});
+
+test('defaultLiveIngestionWindow for target June: until is May 26 (billing + 1), not May 25', () => {
+  const cycle = computeCycleFromTarget('2026-06');
+  const w = defaultLiveIngestionWindow(cycle);
+  assert.equal(w.since, '2026-04-26');
+  assert.equal(w.until, '2026-05-26');
+  // Sanity: the billing cycle date itself is still the 25th.
+  assert.equal(formatDate(cycle.billingCycleDate), '2026-05-25');
+});
+
+test('defaultLiveIngestionWindow round-trip matches CLI docs (May 9 -> covers May 25 billing)', () => {
+  const cycle = computeCycle('2026-05-09');
+  const w = defaultLiveIngestionWindow(cycle);
+  // window.until should be >= billing cycle date.
+  assert.equal(w.until, '2026-05-26');
+  // The 25th billing date is within [since, until).
+  assert.equal(formatDate(cycle.billingCycleDate), '2026-05-25');
+  assert.ok(w.since <= '2026-05-25' && '2026-05-25' < w.until);
 });
 
 test('prepaidFirstBoxMonth: 26th-end advances; 1st-24th stays', () => {

@@ -134,6 +134,46 @@ function gidToNumericId(gid) {
   return m ? m[1] : '';
 }
 
+// Known custom-attribute keys (case-insensitive) that Appstle / Shopify
+// integrations use to stamp the subscription ID onto a line item. If your
+// installation uses a key not in this list, add it here — we deliberately
+// keep the list explicit instead of accepting any key that contains
+// "subscription", because custom attributes can carry customer-entered
+// text and we never want to mis-classify a random attribute value as an
+// identifier.
+const SUBSCRIPTION_ID_ATTRIBUTE_KEYS = new Set([
+  'subscription_id',
+  'subscription id',
+  'subscriptionid',
+  'appstle_subscription_id',
+  'appstle subscription id',
+  'appstle-subscription-id',
+  '_appstle_subscription_id',
+  'appstle_subscription',
+]);
+
+/**
+ * Extract a subscription identifier from a line item's customAttributes.
+ * We only read the value when the key matches a known synonym; we never
+ * log the value (treat it like any other id — see src/privacy.js).
+ * Returns '' when no recognized key is present.
+ */
+function extractSubscriptionIdFromAttrs(attrs) {
+  if (!Array.isArray(attrs)) return '';
+  for (const attr of attrs) {
+    if (!attr || typeof attr !== 'object') continue;
+    const key = typeof attr.key === 'string' ? attr.key.trim().toLowerCase() : '';
+    if (!key) continue;
+    if (SUBSCRIPTION_ID_ATTRIBUTE_KEYS.has(key)) {
+      const value = attr.value;
+      if (value === null || value === undefined) continue;
+      const s = String(value).trim();
+      if (s) return s;
+    }
+  }
+  return '';
+}
+
 /** Format a date as the YYYY-MM-DD prefix that Shopify's `created_at:` filter accepts. */
 function dateOnly(d) {
   if (!d) return '';
@@ -228,27 +268,36 @@ function normalizeGraphqlOrder(node) {
     const variantId = li.variant ? gidToNumericId(li.variant.id) : '';
     const productName = (li.product && li.product.title) || li.title || li.name || '';
     const planName = (li.sellingPlan && li.sellingPlan.name) || '';
+    const attrs = Array.isArray(li.customAttributes) ? li.customAttributes : [];
+    // Try to recover the Appstle subscription identifier from known custom
+    // attribute keys. This is the only line-item field that carries Appstle's
+    // subscription_id today; the GraphQL schema does not expose a
+    // first-class link from a paid order's line item back to the
+    // SubscriptionContract that produced it. The fallback is also why the
+    // dedupe key set is layered (see src/dedupe.js).
+    const subscriptionId = extractSubscriptionIdFromAttrs(attrs);
     // Quantity preference: currentQuantity (after refunds) -> quantity.
     const currentQuantity = (li.currentQuantity !== undefined && li.currentQuantity !== null)
       ? Number(li.currentQuantity)
       : null;
     const quantity = (li.quantity !== undefined && li.quantity !== null) ? Number(li.quantity) : null;
-    const refundableQuantity = (li.refundableQuantity !== undefined && li.refundableQuantity !== null)
-      ? Number(li.refundableQuantity)
-      : null;
-    // Refund signal heuristic: if currentQuantity < quantity, treat as a
-    // partial refund. (The financialStatus also carries refunded /
-    // partially_refunded, which the normalizer already handles.)
+    // Refund signal heuristic at LINE level: only flag refunds on the line
+    // we're emitting, not on other lines of the same order. Mis-attributing
+    // a refund of an unrelated SKU to the UCS line previously caused false
+    // partially-refunded flags; we surface refunds via the warnings system
+    // (which uses the order-level financial_status) instead.
     const refunded_amount = (
       Number.isFinite(currentQuantity) &&
       Number.isFinite(quantity) &&
       currentQuantity < quantity
     ) ? 1 : 0;
-    // customAttributes: serialize compactly without quoting customer text.
-    const attrs = Array.isArray(li.customAttributes) ? li.customAttributes : [];
+    // customAttributes: log only the KEYS (never values, which may contain
+    // customer-entered text). We also exclude any recognized subscription-id
+    // keys from the summarized list so the "tags" column doesn't accidentally
+    // echo internal Appstle metadata for an operator scanning the CSV.
     const customAttrSummary = attrs
-      .map((a) => (a && a.key ? String(a.key) : ''))
-      .filter(Boolean)
+      .map((a) => (a && a.key ? String(a.key).trim() : ''))
+      .filter((k) => k && !SUBSCRIPTION_ID_ATTRIBUTE_KEYS.has(k.toLowerCase()))
       .join(',');
     return {
       ...baseRow,
@@ -256,11 +305,11 @@ function normalizeGraphqlOrder(node) {
       product_name: productName,
       variant_id: variantId,
       plan_name: planName,
+      subscription_id: subscriptionId,
       quantity: Number.isFinite(currentQuantity) ? currentQuantity : (Number.isFinite(quantity) ? quantity : 1),
       // Keep an attribution note if the line carries a sellingPlan (Appstle
       // subscriptions in Shopify materialize as sellingPlan'd line items).
-      // We do NOT echo customAttribute values, only their keys, since values
-      // may contain customer-entered text.
+      // We do NOT echo customAttribute values, only their keys.
       tags: [baseRow.tags, customAttrSummary].filter(Boolean).join(','),
       refunded_amount,
       total: null,
@@ -300,6 +349,10 @@ function createLiveAdapter(opts = {}) {
       const allRows = [];
       let after = null;
       let pages = 0;
+      // Track the final pageInfo so we can detect "ran out of page budget
+      // while Shopify still had more". Returning a truncated set silently
+      // is a correctness bug — the operator wouldn't know boxes are missing.
+      let lastPageInfo = null;
       while (pages < maxPages) {
         const payload = {
           source_id: SHOPIFY_SOURCE_ID,
@@ -327,10 +380,18 @@ function createLiveAdapter(opts = {}) {
         }
         pages += 1;
         if (log) log(`shopify live: page ${pages}, ${allRows.length} line items so far`);
-        const info = orders.pageInfo || {};
-        if (!info.hasNextPage) break;
-        if (!info.endCursor) break;
-        after = info.endCursor;
+        lastPageInfo = orders.pageInfo || {};
+        if (!lastPageInfo.hasNextPage) break;
+        if (!lastPageInfo.endCursor) break;
+        after = lastPageInfo.endCursor;
+      }
+      if (pages >= maxPages && lastPageInfo && lastPageInfo.hasNextPage) {
+        // Hard-fail rather than return partial data. Operators need to
+        // either narrow the date window or raise `maxPages` deliberately.
+        throw new Error(
+          `shopify live: hit max page cap (${maxPages}) but Shopify still has more results. ` +
+          `Refusing to return partial data. Narrow the --since/--until window or raise the maxPages option.`,
+        );
       }
       if (pages >= maxPages && allRows.length === 0) {
         throw new Error(`shopify live: hit max page cap (${maxPages}) with no results — check date window`);
@@ -382,4 +443,6 @@ module.exports = {
   buildOrdersQuery,
   normalizeGraphqlOrder,
   scrubConnectorError,
+  extractSubscriptionIdFromAttrs,
+  SUBSCRIPTION_ID_ATTRIBUTE_KEYS,
 };

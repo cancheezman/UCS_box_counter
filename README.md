@@ -104,6 +104,16 @@ When `--shopify-live` is set, the agent:
    at 50.
 4. Normalizes GraphQL `orders.nodes[]` (with one row per line item) and
    feeds them into the same `runCount` pipeline as file mode.
+5. Recovers the Appstle subscription identifier from each line item's
+   `customAttributes`, matching the known synonyms (`subscription_id`,
+   `Subscription ID`, `appstle_subscription_id`, `_appstle_subscription_id`,
+   etc.). When present, this lets the dedupe layer collapse a live-mode
+   order against the Appstle subscription export by the strongest key
+   (`sub:<id>`). When absent, dedupe falls back to
+   `email + product/plan + month`; see [Deduplication](#deduplication).
+6. If Shopify still has more results when the page budget is exhausted,
+   the adapter throws a clear error rather than returning partial data.
+   Narrow `--since`/`--until` (or raise `maxPages` in code) to recover.
 
 Scopes required of the connector for the query to succeed (least
 privilege — all read-only):
@@ -168,13 +178,22 @@ error messages.
 
 ## Deduplication
 
-Duplicates across buckets are removed at the *target box month* level using
-the following key order:
+Duplicates across buckets are removed at the *target box month* level. For
+each entry the dedupe layer emits a layered key set; the most specific key
+available is used, with looser keys only as fallbacks:
 
-1. `subscription_id`
-2. `shopify_customer_id` + target month
-3. `customer_email` + target month
-4. `customer_email` + product/plan + target month
+1. `sub:<subscription_id>` — strongest. If present, always wins.
+2. `cust:<shopify_customer_id>|<month>` — when no subscription_id.
+3. `email-plan:<email>|<product>|<plan>|<month>` — when an email is known
+   AND there is any plan or product info on the entry. This is the normal
+   case for both file-mode and live-mode order rows.
+4. `email:<email>|<month>` — last-resort fallback, only emitted when the
+   entry has no plan/product information at all.
+
+The bare-email key is NOT emitted alongside the email-plan key. This
+prevents two distinct UCS subscriptions sharing an email (e.g. a Monthly
+and a 12-month prepaid on the same household account) from silently
+collapsing to one box.
 
 Bucket priority for which row wins when input order is mixed:
 `recurring_billing` > `new_order_window` > `prepaid_coverage` >
@@ -204,6 +223,16 @@ The agent never silently drops edge cases. Each is emitted as a warning in
 - Live mode requires the `external-tool` CLI in the host environment.
   In environments where it is not available, run with `--orders <file>`
   against a manual export.
+- Live mode recovers the Appstle subscription identifier from
+  `lineItem.customAttributes` only. If your Appstle installation does
+  not stamp the subscription ID onto line items under one of the
+  recognized keys (see `SUBSCRIPTION_ID_ATTRIBUTE_KEYS` in
+  `src/shopify.js`), live-mode rows arrive with `subscription_id = ''`
+  and dedupe falls back to the email + product/plan + month key. The
+  dedupe redesign in `src/dedupe.js` keeps that fallback safe (no
+  silent collapsing of distinct plans on a shared email), but the
+  strongest dedupe is still by subscription_id — add your key to the
+  set if a real run shows orphan rows.
 - Currency totals are read but not used in any count (refunded amount IS
   used as a heuristic to flag full vs partial refunds).
 - "Manual adjustments / exceptions" for the final run are not yet a first-
@@ -269,8 +298,13 @@ The suite covers:
 - Live Shopify adapter (via injected fake connector): pagination using
   `pageInfo.hasNextPage` / `endCursor`, GID → numeric ID extraction,
   GraphQL line-item → row normalization (one row per line item, custom
-  attribute values never echoed, refund-quantity heuristic), connector
-  error scrubbing for tokens / emails / long IDs, clean errors on empty
-  responses. The live tests use the dependency-injection seam in
-  `src/connector.js` so they never spawn `external-tool` and never make
-  network calls.
+  attribute values never echoed, refund-quantity heuristic at line level
+  only), subscription_id recovery from line-item customAttributes,
+  pagination cap hard-fails when Shopify still has more results (no
+  silent truncation), connector error scrubbing for tokens / emails /
+  long IDs, clean errors on empty responses. The live tests use the
+  dependency-injection seam in `src/connector.js` so they never spawn
+  `external-tool` and never make network calls.
+- Live ingestion window defaults: `defaultLiveIngestionWindow` returns
+  `until = billing_cycle_date + 1 day` so Shopify's
+  `created_at:<=YYYY-MM-DD` filter actually covers the 25th billing day.

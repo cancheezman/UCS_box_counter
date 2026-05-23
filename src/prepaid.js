@@ -27,10 +27,14 @@ function parsePlan(planName) {
   }
   const name = planName.trim();
   const lower = name.toLowerCase();
-  const isPrepaid = /prepaid|prepay|pre-paid/.test(lower) || /\b(2|3|4|6|12)\s*[-]?\s*month/.test(lower);
+  // Require an explicit prepaid signal. We deliberately do NOT treat a bare
+  // "<N> month" string as prepaid — a plan literally named "12 month
+  // commitment, billed monthly" is recurring, not prepaid, and miscategorizing
+  // it would mis-count boxes for an entire year.
+  const isPrepaid = /\b(prepaid|prepay|pre-paid)\b/.test(lower);
   if (!isPrepaid) return { isPrepaid: false, length: null, raw: name };
 
-  // Find a "<N> month(s)" or "<N>-month" token.
+  // Find a "<N> month(s)" or "<N>-month" token to extract the term length.
   const m = lower.match(/(\d{1,2})\s*[-]?\s*month/);
   if (m) {
     const n = Number(m[1]);

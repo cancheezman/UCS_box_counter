@@ -18,7 +18,7 @@ const { normalizeAppstleSubscription } = require('../src/normalize');
 const { createAdapter } = require('../src/shopify');
 const { runCount } = require('../src/count');
 const { buildMarkdown, buildJson, buildCsv } = require('../src/report');
-const { computeCycle, computeCycleFromTarget, formatDate, addMonths } = require('../src/dates');
+const { computeCycle, computeCycleFromTarget, defaultLiveIngestionWindow } = require('../src/dates');
 
 function parseArgs(argv) {
   const args = { _: [] };
@@ -61,7 +61,8 @@ function usage() {
     '  --since <YYYY-MM-DD>      Start of the live ingestion date window. Defaults',
     '                            to the start of the new-order window for the target.',
     '  --until <YYYY-MM-DD>      End of the live ingestion date window. Defaults to',
-    '                            the billing cycle date for the target.',
+    '                            the day AFTER the billing cycle date so the 25th',
+    '                            (and any midnight spillover) is included.',
     '  --out <dir>               Output directory (default: ./out).',
     '  --quiet                   Suppress summary on stdout.',
     '  --verbose                 Also print the mask-safe Markdown summary to stdout.',
@@ -140,11 +141,13 @@ async function main(argv) {
     const cycle = args['target-month']
       ? computeCycleFromTarget(args['target-month'])
       : computeCycle(args['run-date'] || new Date());
-    const since = args.since || formatDate(cycle.newOrderWindowStart);
-    // Default upper bound: one day after billing cycle, to catch orders
-    // processed just after midnight on the 25th.
-    const defaultUntil = formatDate(addMonths(cycle.billingCycleDate, 0));
-    const until = args.until || defaultUntil;
+    // Default window covers the new-order window through the day AFTER
+    // the billing cycle date, so Shopify's `created_at:<=YYYY-MM-DD` filter
+    // (interpreted as `<= YYYY-MM-DDT00:00:00`) reliably includes every
+    // order created on the 25th plus any midnight spillover.
+    const window = defaultLiveIngestionWindow(cycle);
+    const since = args.since || window.since;
+    const until = args.until || window.until;
     const log = args.quiet ? null : (msg) => process.stderr.write(`${msg}\n`);
     const adapter = createAdapter({
       mode: 'live',

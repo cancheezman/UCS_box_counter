@@ -78,6 +78,13 @@ function parseMonth(input) {
   return new Date(Date.UTC(y, m - 1, 1));
 }
 
+/** Add a (signed) integer number of days to a UTC date. */
+function addDays(date, days) {
+  const d = new Date(date.getTime());
+  d.setUTCDate(d.getUTCDate() + Number(days || 0));
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
 /** Add a (signed) integer number of months to a UTC date, preserving day-of-month when possible. */
 function addMonths(date, months) {
   const y = date.getUTCFullYear();
@@ -161,6 +168,24 @@ function computeCycleFromTarget(targetMonthStr) {
   };
 }
 
+/**
+ * Default live-ingestion date window for a given cycle.
+ *
+ *   since = start of the new-order window (26th of M-2)
+ *   until = billing_cycle_date + 1 day (so Shopify's `created_at:<=YYYY-MM-DD`
+ *           inclusive filter actually covers the entire 25th plus any
+ *           midnight spillover into the 26th)
+ *
+ * Returns plain YYYY-MM-DD strings so the result is ready to drop into a
+ * Shopify search query.
+ */
+function defaultLiveIngestionWindow(cycle) {
+  return {
+    since: formatDate(cycle.newOrderWindowStart),
+    until: formatDate(addDays(cycle.billingCycleDate, 1)),
+  };
+}
+
 /** True if a is the same calendar day as b (UTC). */
 function sameDay(a, b) {
   return (
@@ -198,6 +223,7 @@ module.exports = {
   formatDate,
   parseMonth,
   formatMonth,
+  addDays,
   addMonths,
   firstOfMonth,
   computeCycle,
@@ -205,4 +231,5 @@ module.exports = {
   sameDay,
   inRangeInclusive,
   prepaidFirstBoxMonth,
+  defaultLiveIngestionWindow,
 };

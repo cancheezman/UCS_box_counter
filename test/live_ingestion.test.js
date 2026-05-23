@@ -110,6 +110,82 @@ test('live ingestion: full path produces a final count with dedupe across bucket
   }
 });
 
+test('live ingestion: subscription_id from line-item customAttributes propagates and dedupes against Appstle', async () => {
+  const fakeOrders = [
+    {
+      id: 'gid://shopify/Order/200001',
+      createdAt: '2026-04-28T12:00:00Z',
+      processedAt: '2026-04-28T12:00:00Z',
+      displayFinancialStatus: 'PAID',
+      displayFulfillmentStatus: 'FULFILLED',
+      tags: ['appstle'],
+      email: 'sub-recon@example.test',
+      customer: {
+        id: 'gid://shopify/Customer/5101',
+        displayName: 'Synth Recon',
+        defaultEmailAddress: { emailAddress: 'sub-recon@example.test' },
+      },
+      shippingAddress: { name: 'Synth Recon', address1: '1 Recon St', city: 'Testville', provinceCode: 'NY', zip: '00000' },
+      lineItems: {
+        nodes: [
+          {
+            quantity: 1, currentQuantity: 1,
+            sellingPlan: { name: 'Prepaid: 3 months' },
+            product: { id: `gid://shopify/Product/${UCS_PRODUCT_ID}`, title: 'UCS' },
+            variant: { id: 'gid://shopify/ProductVariant/9201' },
+            customAttributes: [{ key: 'appstle_subscription_id', value: 'APP-RECON-1' }],
+          },
+        ],
+      },
+    },
+  ];
+  setRunner(async () => ({
+    data: {
+      orders: {
+        pageInfo: { hasNextPage: false, endCursor: null },
+        nodes: fakeOrders,
+      },
+    },
+  }));
+  try {
+    const adapter = createAdapter({ mode: 'live' });
+    const orders = await adapter.fetchOrders({ since: '2026-04-26', until: '2026-05-26' });
+    assert.equal(orders.length, 1);
+    assert.equal(orders[0].subscription_id, 'APP-RECON-1');
+    // Reconciliation: the Appstle sub for the same subscription_id.
+    const subscriptions = [
+      normalizeAppstleSubscription({
+        subscription_id: 'APP-RECON-1',
+        customer_email: 'sub-recon@example.test',
+        status: 'active',
+        product_id: UCS_PRODUCT_ID,
+        product_name: 'UCS',
+        plan_name: 'Prepaid: 3 months',
+        created_date: '2026-04-28',
+        delivery_method: 'shipping',
+      }),
+    ];
+    const report = runCount({
+      subscriptions,
+      orders,
+      targetMonth: '2026-06',
+      reportType: 'final',
+    });
+    // One unique customer/subscription; the order shows up in
+    // new_order_window AND the sub shows up in prepaid_coverage;
+    // they must dedupe by sub:APP-RECON-1.
+    assert.equal(report.counts.final_box_count, 1);
+    assert.ok(report.counts.duplicates_removed >= 1);
+    const allDupKeys = report.duplicates.map((d) => d.dedupe_key_hit);
+    assert.ok(
+      allDupKeys.includes('sub:APP-RECON-1'),
+      `expected sub:APP-RECON-1 in dedupe key hits, got ${JSON.stringify(allDupKeys)}`,
+    );
+  } finally {
+    resetRunner();
+  }
+});
+
 test('live ingestion: errors from the connector are scrubbed before being thrown', async () => {
   setRunner(async () => {
     throw new Error('upstream 500 for customer synth-1@example.test order 1234567890 token shpat_ABCDEFGHIJKLMNOPQRSTUVWXYZ');

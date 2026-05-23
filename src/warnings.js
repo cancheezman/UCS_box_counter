@@ -131,8 +131,12 @@ function checkOrders(orders, subscriptions, cycle, warnings = []) {
         { order_id: o.order_id });
     }
     if (o.partially_refunded) {
+      // We cannot tell from order-level financial_status alone whether the
+      // refund applied to the UCS line or to a different line on the same
+      // order. Surface it as a review warning rather than excluding the box
+      // — the operator decides.
       warn(warnings, WARNING_CODES.ORDER_PARTIALLY_REFUNDED,
-        `${orderRef(o)}: partially refunded.`,
+        `${orderRef(o)}: order is partially refunded — review whether the UCS line was affected.`,
         { order_id: o.order_id, customer_email: o.customer_email, refunded_amount: o.refunded_amount, total: o.total });
     }
     if (!o.delivery_method) {

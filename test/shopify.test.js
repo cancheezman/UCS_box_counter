@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const {
   createAdapter, createLiveAdapter, gidToNumericId, buildOrdersQuery,
   normalizeGraphqlOrder, scrubConnectorError, REQUIRED_SCOPES, ORDERS_QUERY,
-  MAX_PAGE_SIZE,
+  MAX_PAGE_SIZE, extractSubscriptionIdFromAttrs,
 } = require('../src/shopify');
 
 test('fixture adapter is read-only and resolves locally', async () => {
@@ -121,6 +121,102 @@ test('normalizeGraphqlOrder: one node with one UCS line item -> one row', () => 
   assert.match(r.tags, /note/);
 });
 
+test('extractSubscriptionIdFromAttrs: recognized keys are extracted, others ignored', () => {
+  assert.equal(
+    extractSubscriptionIdFromAttrs([{ key: 'subscription_id', value: 'APP-1001' }]),
+    'APP-1001',
+  );
+  assert.equal(
+    extractSubscriptionIdFromAttrs([{ key: 'Subscription ID', value: 'APP-1002' }]),
+    'APP-1002',
+  );
+  assert.equal(
+    extractSubscriptionIdFromAttrs([{ key: 'appstle_subscription_id', value: 'APP-1003' }]),
+    'APP-1003',
+  );
+  assert.equal(
+    extractSubscriptionIdFromAttrs([{ key: '_appstle_subscription_id', value: 'APP-1004' }]),
+    'APP-1004',
+  );
+  assert.equal(
+    extractSubscriptionIdFromAttrs([{ key: 'gift_note', value: 'happy birthday' }]),
+    '',
+  );
+  // Mixed: pick the matching one, leave gift_note alone.
+  assert.equal(
+    extractSubscriptionIdFromAttrs([
+      { key: 'gift_note', value: 'happy birthday' },
+      { key: 'subscription_id', value: 'APP-1005' },
+    ]),
+    'APP-1005',
+  );
+});
+
+test('extractSubscriptionIdFromAttrs: non-array / empty input is safe', () => {
+  assert.equal(extractSubscriptionIdFromAttrs(null), '');
+  assert.equal(extractSubscriptionIdFromAttrs(undefined), '');
+  assert.equal(extractSubscriptionIdFromAttrs([]), '');
+  assert.equal(extractSubscriptionIdFromAttrs([{ key: 'subscription_id', value: '' }]), '');
+});
+
+test('normalizeGraphqlOrder: subscription_id is recovered from customAttributes when present', () => {
+  const node = {
+    id: 'gid://shopify/Order/100400',
+    createdAt: '2026-05-25T12:00:00Z',
+    displayFinancialStatus: 'PAID',
+    displayFulfillmentStatus: 'FULFILLED',
+    customer: { id: 'gid://shopify/Customer/5004' },
+    shippingAddress: {},
+    lineItems: {
+      nodes: [
+        {
+          quantity: 1, currentQuantity: 1,
+          sellingPlan: { name: 'Monthly' },
+          product: { id: 'gid://shopify/Product/7890199412991', title: 'UCS' },
+          variant: { id: 'gid://shopify/ProductVariant/9050' },
+          customAttributes: [
+            { key: 'gift_note', value: 'should-not-be-echoed' },
+            { key: 'appstle_subscription_id', value: 'APP-7777' },
+          ],
+        },
+      ],
+    },
+  };
+  const rows = normalizeGraphqlOrder(node);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].subscription_id, 'APP-7777');
+  // Values must not be echoed in the tags summary.
+  assert.equal(rows[0].tags.includes('should-not-be-echoed'), false);
+  // Recognized subscription-id keys are stripped from the tags summary
+  // so internal Appstle metadata doesn't sit next to operator-visible text.
+  assert.equal(rows[0].tags.includes('appstle_subscription_id'), false);
+  // Unknown keys are still summarized (key only, no value).
+  assert.match(rows[0].tags, /gift_note/);
+});
+
+test('normalizeGraphqlOrder: subscription_id is empty when no recognized key is present', () => {
+  const node = {
+    id: 'gid://shopify/Order/100500',
+    createdAt: '2026-05-25T12:00:00Z',
+    displayFinancialStatus: 'PAID',
+    customer: { id: 'gid://shopify/Customer/5005' },
+    shippingAddress: {},
+    lineItems: {
+      nodes: [
+        {
+          quantity: 1, currentQuantity: 1,
+          sellingPlan: { name: 'Monthly' },
+          product: { id: 'gid://shopify/Product/7890199412991', title: 'UCS' },
+          variant: { id: 'gid://shopify/ProductVariant/9060' },
+          customAttributes: [{ key: 'note', value: 'just a note' }],
+        },
+      ],
+    },
+  };
+  const rows = normalizeGraphqlOrder(node);
+  assert.equal(rows[0].subscription_id, '');
+});
+
 test('normalizeGraphqlOrder: order with multiple line items emits one row per line item', () => {
   const node = {
     id: 'gid://shopify/Order/100200',
@@ -173,6 +269,30 @@ test('normalizeGraphqlOrder: refunded quantity flips refunded_amount heuristic',
   assert.equal(rows.length, 1);
   assert.equal(rows[0].quantity, 1);
   assert.equal(rows[0].refunded_amount, 1); // heuristic: currentQty < qty
+});
+
+test('live adapter: hitting maxPages while Shopify still has more results throws (no silent truncation)', async () => {
+  // Connector always claims hasNextPage=true with a fresh cursor. The
+  // adapter should bail out instead of returning the partial set it has.
+  let cursor = 0;
+  const fakeRunner = async () => ({
+    data: {
+      orders: {
+        pageInfo: { hasNextPage: true, endCursor: `cursor-${++cursor}` },
+        nodes: [makeFakeOrder(cursor)],
+      },
+    },
+  });
+  const adapter = createLiveAdapter({ connectorCall: fakeRunner, pageSize: 1, maxPages: 3 });
+  await assert.rejects(
+    () => adapter.fetchOrders({ since: '2026-04-26', until: '2026-05-26' }),
+    (err) => {
+      assert.match(err.message, /hit max page cap/);
+      assert.match(err.message, /still has more results/);
+      assert.match(err.message, /Refusing to return partial data/);
+      return true;
+    },
+  );
 });
 
 test('live adapter: paginates using endCursor until hasNextPage=false', async () => {
