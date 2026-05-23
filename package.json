@@ -1,0 +1,26 @@
+{
+  "name": "ucs-box-counter",
+  "version": "0.1.0",
+  "description": "UCS Monthly Box Count Agent for TOMME - calculates how many subscription cheese boxes to prepare for the upcoming box month.",
+  "main": "src/index.js",
+  "bin": {
+    "ucs-box-counter": "bin/ucs-box-counter.js"
+  },
+  "scripts": {
+    "test": "node --test test/",
+    "start": "node bin/ucs-box-counter.js",
+    "lint": "node -e \"require('./src/index.js')\""
+  },
+  "keywords": [
+    "ucs",
+    "tomme",
+    "appstle",
+    "shopify",
+    "subscription"
+  ],
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  }
+}
